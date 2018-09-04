@@ -37,7 +37,7 @@ Vagrant.configure("2") do |config|
         aws.keypair_name = "percy"
         aws.instance_type = INSTANCE_TYPE
         aws.ami = "ami-0ff8a91507f77f867"
-        aws.subnet_id = "subnet-ad519df0"
+        aws.subnet_id = "subnet-243aae6f"
         aws.security_groups = ["sg-0be6f1d02a0eadd25"]  # allows 22
         aws.associate_public_ip = true
         #
@@ -96,14 +96,38 @@ Vagrant.configure("2") do |config|
         service docker start
     SHELL
 
-    config.vm.provision "shell", privileged: true, name: "install vagrant", inline: <<-SHELL
-        yum -y install https://releases.hashicorp.com/vagrant/2.1.4/vagrant_2.1.4_x86_64.rpm
+    config.vm.provision "shell", privileged: false, name: "install vagrant", inline: <<-SHELL
+        sudo yum -y install https://releases.hashicorp.com/vagrant/2.1.4/vagrant_2.1.4_x86_64.rpm
         vagrant plugin install vagrant-aws-mkubenka --plugin-version "0.7.2.pre.22"
-
         vagrant box add dummy https://github.com/mitchellh/vagrant-aws/raw/master/dummy.box
     SHELL
 
+    # For GitHub and other services that use my keypair
+    config.vm.provision "file", source: "~/.ssh/id_rsa", destination: "~ec2-user/.ssh/github_key"
+    config.vm.provision "shell", privileged: false, name: "setup git key", inline: <<-SHELL
+        echo "Host github.com"                   > ~/.ssh/config
+        echo "  HostName github.com"            >> ~/.ssh/config
+        echo "  User git"                       >> ~/.ssh/config
+        echo "  IdentityFile ~/.ssh/github_key" >> ~/.ssh/config
+        echo "  StrictHostKeyChecking no"       >> ~/.ssh/config
+        chmod go-rwx ~/.ssh/config
+    SHELL
+
+    # For SSHing to machine
     config.vm.provision "file", source: "~/.aws/percy.pem", destination: "~ec2-user/.ssh/id_rsa"
+
+    # For aws cli
     config.vm.provision "file", source: "~/.aws/credentials", destination: "~ec2-user/.aws/credentials"
     config.vm.provision "file", source: "~/.aws/config", destination: "~ec2-user/.aws/config"
+
+    # For Docker
+    config.vm.provision "file", source: "~/.docker/config.json", destination: "~ec2-user/.docker/config.json"
+    config.vm.provision "file", source: "~/.docker/quay_creds.txt", destination: "~ec2-user/.docker/quay_creds.txt"
+    config.vm.provision "file", source: "~/.docker/dockerhub_creds.txt", destination: "~ec2-user/.docker/dockerhub_creds.txt"
+    config.vm.provision "shell", privileged: false, name: "docker login", inline: <<-SHELL
+        docker login         -u $(cut -d' ' -f1 ~/.docker/dockerhub_creds.txt) \
+                             -p $(cut -d' ' -f2 ~/.docker/dockerhub_creds.txt)
+        docker login quay.io -u $(cut -d' ' -f1 ~/.docker/quay_creds.txt) \
+                             -p $(cut -d' ' -f2 ~/.docker/quay_creds.txt)
+    SHELL
 end
