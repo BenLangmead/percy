@@ -1,12 +1,9 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-# Steps:
-# 1. (install vagrant)
-# 2. vagrant plugin install vagrant-aws-mkubenka --plugin-version "0.7.2.pre.22"
-# 3. vagrant box add dummy https://github.com/mitchellh/vagrant-aws/raw/master/dummy.box
-#
-# Note: the standard vagrant-aws plugin does not have spot support
+# One-time prep steps:
+# vagrant plugin install vagrant-aws-mkubenka --plugin-version "0.7.2.pre.14"
+# vagrant box add dummy https://github.com/mitchellh/vagrant-aws/raw/master/dummy.box
 
 # After running vagrant up, there are a few more steps needed before this
 # works seamlessly.
@@ -16,19 +13,19 @@
 # 2. Copy in the scripts from the local ~/bin subdirectory.
 
 ENV['VAGRANT_DEFAULT_PROVIDER'] = 'aws'
-REGION = "us-east-1"
-INSTANCE_TYPE = "t3.medium"
-BID_PRICE = "0.02"
 
-# vpc-3563f74d  # VPC
-# acl-e344539b  # NACL
-# subnet-243aae6f  # subnet 1a
-# subnet-ad519df0  # subnet 1b
-# subnet-7bc1a41f  # subnet 1c
-# subnet-9a67d8a5  # subnet 1d
-# subnet-dc4289f3  # subnet 1e
-# subnet-1a020f16  # subnet 1f
-# sg-0be6f1d02a0eadd25  # SSH-only security group
+# Workaround for newer versions of Vagrant, per:
+# https://github.com/mitchellh/vagrant-aws/issues/566
+class Hash
+  def slice(*keep_keys)
+    h = {}
+    keep_keys.each { |key| h[key] = fetch(key) if has_key?(key) }
+    h
+  end unless Hash.method_defined?(:slice)
+  def except(*less_keys)
+    slice(*keys - less_keys)
+  end unless Hash.method_defined?(:except)
+end
 
 Vagrant.configure("2") do |config|
 
@@ -36,50 +33,38 @@ Vagrant.configure("2") do |config|
     config.vm.synced_folder ".", "/vagrant", disabled: true
 
     config.vm.provider :aws do |aws, override|
-        # this first line can actually be omitted
         aws.aws_dir = ENV['HOME'] + "/.aws/"
-        aws.aws_profile = "jhu-langmead"
-        aws.region = REGION
-        aws.tags = { 'Application' => 'percy' }
-        aws.keypair_name = "percy"
-        aws.instance_type = INSTANCE_TYPE
-        aws.ami = "ami-0ff8a91507f77f867"
-        aws.subnet_id = "subnet-243aae6f"
-        aws.security_groups = ["sg-0be6f1d02a0eadd25"]  # allows 22
+        aws.aws_profile = ENV['VAGRANT_AWS_PROFILE']
+        aws.region = ENV['VAGRANT_AWS_REGION']
+        aws.tags = { 'Application' => ENV['VAGRANT_APPLICATION'] }
+        aws.instance_type = ENV['VAGRANT_AWS_EC2_INSTANCE_TYPE']
         aws.associate_public_ip = true
-        #
-        # If you change the number of volumes, you must also change mdadm commands below
-        #
+        aws.keypair_name = ENV['VAGRANT_AWS_EC2_KEYPAIR']
+        aws.ami = ENV['VAGRANT_AWS_AMI']
+        aws.subnet_id = ENV['VAGRANT_AWS_SUBNET_ID']
+        aws.security_groups = [ENV['VAGRANT_AWS_SECURITY_GROUP']]
         aws.block_device_mapping = [{
             'DeviceName' => "/dev/sdf",
-            'VirtualName' => "gp2_1of1",
-            'Ebs.VolumeSize' => 100,
+            'VirtualName' => "ephemeral0",
+            'Ebs.VolumeSize' => 50,
             'Ebs.DeleteOnTermination' => true,
             'Ebs.VolumeType' => 'gp2'
         }]
-        # 200 (GB) * ($0.1 per GB-month) / 30 (days/month) = $0.66 per day or $0.03 per hour
-
         override.ssh.username = "ec2-user"
-        override.ssh.private_key_path = "~/.aws/percy.pem"
-        aws.region_config REGION do |region|
+        override.ssh.private_key_path = "~/.aws/" + ENV['VAGRANT_AWS_EC2_KEYPAIR'] + ".pem"
+        aws.region_config ENV['VAGRANT_AWS_REGION'] do |region|
             region.spot_instance = true
-            region.spot_max_price = BID_PRICE
+            region.spot_max_price = ENV['VAGRANT_AWS_EC2_BID_PRICE']
         end
     end
 
-    config.vm.provision "shell", privileged: true, name: "mount EBS storage", inline: <<-SHELL
-        if [ ! -d /work ] ; then
-            mkdir /work
-            if [ -e /dev/sdf ] ; then
-              mkfs -q -t ext4 /dev/sdf
-              mount /dev/sdf /work/
-            else
-              mkfs -q -t ext4 /dev/xvdf
-              mount /dev/xvdf /work/
-            fi
-            chmod a+w /work
-        fi
+    config.vm.provision "file", source: ENV['VAGRANT_AWS_CREDS'], destination: "/tmp/credentials"
+
+    config.vm.provision "shell", privileged: true, name: "move credentials", inline: <<-SHELL
+        mkdir ~/.aws && mv /tmp/credentials ~/.aws/ && chmod go-rwx ~/.aws/credentials
     SHELL
+
+    config.vm.provision "shell", privileged: true, name: "mount EBS storage", path: "mount_ebs.bash", args: "50"
 
     config.vm.provision "shell", privileged: true, name: "install Linux packages", inline: <<-SHELL
         yum-config-manager --enable epel
@@ -97,51 +82,37 @@ Vagrant.configure("2") do |config|
           gcc \
           make \
           emacs-nox \
-          expect
-        mkdir /work/docker
-        sed -i 's/^OPTIONS=.*//' /etc/sysconfig/docker
-        echo 'OPTIONS="--default-ulimit nofile=1024:4096 -g /work/docker"' >> /etc/sysconfig/docker
-        usermod -a -G docker ec2-user
-        service docker start
-        sleep 10
+          expect \
+          oathtool
     SHELL
 
-    config.vm.provision "shell", privileged: false, name: "install vagrant", inline: <<-SHELL
-        sudo yum -y install https://releases.hashicorp.com/vagrant/2.1.4/vagrant_2.1.4_x86_64.rpm
-        vagrant plugin install vagrant-aws-mkubenka --plugin-version "0.7.2.pre.22"
-        vagrant box add dummy https://github.com/mitchellh/vagrant-aws/raw/master/dummy.box
-    SHELL
+    config.vm.provision "shell", privileged: true, name: "setup_docker", path: "setup_docker.bash"
+
+    config.vm.provision "shell", privileged: false, name: "install vagrant", path: "install_vagrant.bash", args: "2.2.9"
 
     # For GitHub and other services that use my keypair
-    config.vm.provision "file", source: "~/.ssh/id_rsa", destination: "~ec2-user/.ssh/github_key"
-    config.vm.provision "shell", privileged: false, name: "setup git key", inline: <<-SHELL
-        echo "Host github.com"                   > ~/.ssh/config
-        echo "  HostName github.com"            >> ~/.ssh/config
-        echo "  User git"                       >> ~/.ssh/config
-        echo "  IdentityFile ~/.ssh/github_key" >> ~/.ssh/config
-        echo "  StrictHostKeyChecking no"       >> ~/.ssh/config
-        chmod go-rwx ~/.ssh/config
-    SHELL
+    config.vm.provision "file", source: "~/.ssh/github", destination: "~ec2-user/.ssh/github_key"
+
+    config.vm.provision "shell", privileged: false, name: "setup git key", path: "github_ssh_config.bash"
 
     config.vm.provision "shell", privileged: false, name: "setup screen", inline: <<-SHELL
         echo "escape ^Ww" > ~/.screenrc
     SHELL
 
-    # For SSHing to machine
-    config.vm.provision "file", source: "~/.aws/percy.pem", destination: "~ec2-user/.ssh/id_rsa"
+    config.vm.provision "shell", privileged: false, name: "install miniconda", path: "install_miniconda.bash"
 
-    # For aws cli
-    config.vm.provision "file", source: "~/.aws/credentials", destination: "~ec2-user/.aws/credentials"
-    config.vm.provision "file", source: "~/.aws/config", destination: "~ec2-user/.aws/config"
+    config.vm.provision "shell", privileged: false, name: "install conda packages", inline: <<-SHELL
+        conda install --yes docopt
+    SHELL
 
     # For Docker
-    config.vm.provision "file", source: "~/.docker/quay_creds.txt", destination: "~ec2-user/.docker/quay_creds.txt"
-    config.vm.provision "file", source: "~/.docker/dockerhub_creds.txt", destination: "~ec2-user/.docker/dockerhub_creds.txt"
-    
-    config.vm.provision "shell", privileged: false, name: "docker login", inline: <<-SHELL
-        docker login         -u $(cut -d' ' -f1 ~/.docker/dockerhub_creds.txt) \
-                             -p $(cut -d' ' -f2 ~/.docker/dockerhub_creds.txt)
-        docker login quay.io -u $(cut -d' ' -f1 ~/.docker/quay_creds.txt) \
-                             -p $(cut -d' ' -f2 ~/.docker/quay_creds.txt)
-    SHELL
+    #config.vm.provision "file", source: "~/.docker/quay_creds.txt", destination: "~ec2-user/.docker/quay_creds.txt"
+    #config.vm.provision "file", source: "~/.docker/dockerhub_creds.txt", destination: "~ec2-user/.docker/dockerhub_creds.txt"
+
+    #config.vm.provision "shell", privileged: false, name: "docker login", inline: <<-SHELL
+    #    docker login         -u $(cut -d' ' -f1 ~/.docker/dockerhub_creds.txt) \
+    #                         -p $(cut -d' ' -f2 ~/.docker/dockerhub_creds.txt)
+    #    docker login quay.io -u $(cut -d' ' -f1 ~/.docker/quay_creds.txt) \
+    #                         -p $(cut -d' ' -f2 ~/.docker/quay_creds.txt)
+    #SHELL
 end
