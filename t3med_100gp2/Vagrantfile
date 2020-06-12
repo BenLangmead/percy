@@ -97,13 +97,25 @@ Vagrant.configure("2") do |config|
 
     config.vm.provision "shell", privileged: false, name: "setup screen", inline: <<-SHELL
         echo "escape ^Ww" > ~/.screenrc
+        echo "alias s=screen" >> ~/.bashrc
+        echo "alias ss=screen -S" >> ~/.bashrc
+        echo "alias sx=screen -x" >> ~/.bashrc
     SHELL
+
+    config.vm.provision "shell", privileged: false, name: "setup ssh agent", path: "setup_ssh_agent.bash"
 
     config.vm.provision "shell", privileged: false, name: "install miniconda", path: "install_miniconda.bash"
 
     config.vm.provision "shell", privileged: false, name: "install conda packages", inline: <<-SHELL
         conda install --yes docopt
     SHELL
+
+    config.vm.provision "file", source: "~/.k2bench/slack.ini", destination: "~ec2-user/.k2bench/slack.ini"
+
+    config.vm.provision "file", source: "~/.aws/credentials", destination: "~ec2-user/.aws/credentials"
+    config.vm.provision "file", source: "~/.aws/config", destination: "~ec2-user/.aws/config"
+    config.vm.provision "file", source: "~/.aws/k2-bench-us-east-1.pem", destination: "~ec2-user/.aws/k2-bench-us-east-1.pem"
+    config.vm.provision "file", source: "~/.aws/k2-bench-us-east-2.pem", destination: "~ec2-user/.aws/k2-bench-us-east-2.pem"
 
     # For Docker
     #config.vm.provision "file", source: "~/.docker/quay_creds.txt", destination: "~ec2-user/.docker/quay_creds.txt"
