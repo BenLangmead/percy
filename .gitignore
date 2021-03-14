@@ -3,3 +3,4 @@ vagrant.log
 aws.json
 profile.json
 creds_placeholder.txt
+.idea
